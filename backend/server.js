@@ -102,10 +102,22 @@ const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
   console.warn("⚠️  MONGODB_URI no está definido. Configúralo en variables de entorno.");
 }
-mongoose
-  .connect(MONGODB_URI || "mongodb://127.0.0.1:27017/wheells", { dbName: "wheells" })
-  .then(() => console.log("✅ Conectado a MongoDB"))
-  .catch((err) => console.error("❌ Error conectando a MongoDB:", err.message));
+
+// Función para conectar a MongoDB
+async function connectToMongoDB() {
+  try {
+    await mongoose.connect(MONGODB_URI || "mongodb://127.0.0.1:27017/wheells", { 
+      dbName: "wheells",
+      serverSelectionTimeoutMS: 5000, // Timeout de 5 segundos
+      socketTimeoutMS: 45000,
+    });
+    console.log("✅ Conectado a MongoDB");
+    return true;
+  } catch (err) {
+    console.error("❌ Error conectando a MongoDB:", err.message);
+    return false;
+  }
+}
 
 // Utilidades JWT
 const JWT_SECRET = process.env.JWT_SECRET || "claveultrasegura";
@@ -181,10 +193,14 @@ app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
 
     console.log("✅ Todos los campos OK, procediendo con registro...");
 
-    // Verificar conexión a MongoDB
+    // Verificar conexión a MongoDB (el servidor solo inicia si MongoDB está conectado, pero verificamos por seguridad)
     if (mongoose.connection.readyState !== 1) {
       console.error("❌ MongoDB no está conectado. Estado:", mongoose.connection.readyState);
-      return res.status(503).json({ error: "Servicio de base de datos no disponible" });
+      console.error("❌ Estados posibles: 0=desconectado, 1=conectado, 2=conectando, 3=desconectando");
+      return res.status(503).json({ 
+        error: "Servicio de base de datos no disponible",
+        message: "Por favor, intenta de nuevo en unos momentos"
+      });
     }
 
     // Verificar si el usuario ya existe
@@ -402,15 +418,43 @@ app.get("/", (req, res) => {
 });
 
 // =====================
-// 🧨 Iniciar servidor
+// 🧨 Iniciar servidor - Esperar conexión a MongoDB
 // =====================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🔥 Servidor escuchando en puerto ${PORT}`);
-  console.log(`🗃️ Base de datos: MongoDB`);
-  console.log(`🌐 CORS permitido para: ${allowedOrigins.join(', ')}`);
-  console.log(`📡 Endpoint de prueba: http://localhost:${PORT}/api/test`);
+
+async function startServer() {
+  // Intentar conectar a MongoDB antes de iniciar el servidor
+  const connected = await connectToMongoDB();
+  
+  if (!connected) {
+    console.error("❌ No se pudo conectar a MongoDB. El servidor no se iniciará.");
+    console.error("⚠️  Verifica que MONGODB_URI esté configurado correctamente.");
+    process.exit(1);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`🔥 Servidor escuchando en puerto ${PORT}`);
+    console.log(`🗃️ Base de datos: MongoDB conectado`);
+    console.log(`🌐 CORS permitido para: ${allowedOrigins.join(', ')}`);
+    console.log(`📡 Endpoint de prueba: http://localhost:${PORT}/api/test`);
+  });
+}
+
+// Manejar eventos de conexión de MongoDB
+mongoose.connection.on('error', (err) => {
+  console.error('❌ Error de MongoDB:', err);
 });
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('⚠️  MongoDB desconectado');
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('✅ MongoDB reconectado');
+});
+
+// Iniciar el servidor
+startServer();
 
 // =====================
 // 🚌 VIAJES Y RESERVAS
