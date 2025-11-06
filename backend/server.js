@@ -159,6 +159,10 @@ app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
     console.log("idUniversitario:", req.body.idUniversitario, "- Tipo:", typeof req.body.idUniversitario, "- Vacío?", !req.body.idUniversitario);
     console.log("role:", req.body.role, "- Tipo:", typeof req.body.role, "- Vacío?", !req.body.role);
     
+    // ✅ CONVERTIR 'name' A 'nombre' - Primero desestructurar
+    const { name, email, password, telefono, idUniversitario, role } = req.body;
+    const nombre = name;
+
     // Verificar campos obligatorios
     const camposRequeridos = ['name', 'email', 'password'];
     const camposVacios = camposRequeridos.filter(campo => !req.body[campo] || req.body[campo].toString().trim() === '');
@@ -174,10 +178,6 @@ app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
 
     if (!isValidEmail(email)) return res.status(400).json({ error: "Email inválido" });
     if (!isValidPassword(password)) return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
-
-    // ✅ CONVERTIR 'name' A 'nombre'
-    const { name, email, password, telefono, idUniversitario, role } = req.body;
-    const nombre = name;
 
     console.log("✅ Todos los campos OK, procediendo con registro...");
 
@@ -218,7 +218,12 @@ app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Error al registrar usuario:", error);
-    res.status(500).json({ error: "Error al registrar el usuario" });
+    console.error("❌ Stack trace:", error.stack);
+    res.status(500).json({ 
+      error: "Error al registrar el usuario",
+      message: error.message || "Error desconocido",
+      details: process.env.NODE_ENV === "development" ? error.stack : undefined
+    });
   }
 });
 
