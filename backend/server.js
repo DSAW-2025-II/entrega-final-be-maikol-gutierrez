@@ -443,17 +443,81 @@ app.post("/api/onboarding/conductor", authRequired, async (req, res) => {
 // 👤 Datos del usuario actual
 // =====================
 app.get("/api/user/me", authRequired, async (req, res) => {
-  const user = await User.findById(req.user.id).lean();
-  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-  return res.json({
-    id: user._id,
-    nombre: user.nombre,
-    email: user.email,
-    rolesCompleted: user.rolesCompleted,
-    currentRole: user.currentRole,
-    status: user.status,
-    vehicle: user.vehicle
-  });
+  try {
+    const user = await User.findById(req.user.id).lean();
+    if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+    return res.json({
+      id: user._id,
+      nombre: user.nombre,
+      email: user.email,
+      telefono: user.telefono || "",
+      idUniversitario: user.idUniversitario || "",
+      rolesCompleted: user.rolesCompleted,
+      currentRole: user.currentRole,
+      preferredRole: user.preferredRole,
+      status: user.status,
+      vehicle: user.vehicle || {}
+    });
+  } catch (e) {
+    console.error("❌ Error al obtener perfil:", e);
+    return res.status(500).json({ error: "Error al obtener perfil" });
+  }
+});
+
+// =====================
+// ✏️ Actualizar perfil del usuario
+// =====================
+app.put("/api/user/me", authRequired, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+
+    const { nombre, telefono, idUniversitario, preferredRole } = req.body;
+
+    // Validaciones
+    if (nombre !== undefined) {
+      if (!nombre || nombre.trim() === "") {
+        return res.status(400).json({ error: "El nombre no puede estar vacío" });
+      }
+      user.nombre = nombre.trim();
+    }
+
+    if (telefono !== undefined) {
+      user.telefono = telefono ? telefono.trim() : "";
+    }
+
+    if (idUniversitario !== undefined) {
+      user.idUniversitario = idUniversitario ? idUniversitario.trim() : "";
+    }
+
+    if (preferredRole !== undefined) {
+      if (preferredRole !== "pasajero" && preferredRole !== "conductor") {
+        return res.status(400).json({ error: "Rol preferido inválido" });
+      }
+      user.preferredRole = preferredRole;
+    }
+
+    await user.save();
+
+    return res.json({
+      message: "Perfil actualizado exitosamente ✅",
+      user: {
+        id: user._id,
+        nombre: user.nombre,
+        email: user.email,
+        telefono: user.telefono,
+        idUniversitario: user.idUniversitario,
+        rolesCompleted: user.rolesCompleted,
+        currentRole: user.currentRole,
+        preferredRole: user.preferredRole,
+        status: user.status,
+        vehicle: user.vehicle
+      }
+    });
+  } catch (e) {
+    console.error("❌ Error al actualizar perfil:", e);
+    return res.status(500).json({ error: "Error al actualizar perfil" });
+  }
 });
 
 // =====================
