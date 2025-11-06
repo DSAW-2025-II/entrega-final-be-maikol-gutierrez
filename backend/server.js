@@ -640,7 +640,7 @@ app.post("/api/trips", authRequired, async (req, res) => {
 app.get("/api/trips/search", async (req, res) => {
   try {
     const { from, to, date } = req.query;
-    const criteria = { seatsAvailable: { $gt: 0 } };
+    const criteria = {};
     
     if (from) criteria.from = new RegExp(from, "i");
     if (to) criteria.to = new RegExp(to, "i");
@@ -662,18 +662,26 @@ app.get("/api/trips/search", async (req, res) => {
     
     const trips = await Trip.find(criteria)
       .populate('driverId', 'nombre email vehicle')
+      .populate('bookings.passengerId', 'nombre email')
       .sort({ departureTime: 1 })
       .limit(100)
       .lean();
     
-    // Formatear respuesta para incluir información del conductor
-    const formattedTrips = trips.map(trip => ({
-      ...trip,
-      driver: trip.driverId ? {
-        nombre: trip.driverId.nombre,
-        vehicle: trip.driverId.vehicle
-      } : null
-    }));
+    // Filtrar y formatear viajes con asientos disponibles (solo aceptados cuentan)
+    const formattedTrips = trips
+      .map(trip => {
+        const acceptedCount = trip.bookings.filter(b => b.status === "accepted").length;
+        const availableSeats = trip.seatsTotal - acceptedCount;
+        return {
+          ...trip,
+          seatsAvailable: availableSeats,
+          driver: trip.driverId ? {
+            nombre: trip.driverId.nombre,
+            vehicle: trip.driverId.vehicle
+          } : null
+        };
+      })
+      .filter(trip => trip.seatsAvailable > 0); // Solo mostrar viajes con asientos disponibles
     
     return res.json({ trips: formattedTrips });
   } catch (e) {
@@ -686,16 +694,83 @@ app.get("/api/trips/search", async (req, res) => {
 app.get("/api/trips/my", authRequired, async (req, res) => {
   try {
     const meId = req.user.id;
-    const asDriver = await Trip.find({ driverId: meId }).sort({ createdAt: -1 }).lean();
-    const asPassenger = await Trip.find({ "bookings.passengerId": meId }).sort({ createdAt: -1 }).lean();
-    return res.json({ asDriver, asPassenger });
+    const asDriver = await Trip.find({ driverId: meId })
+      .populate('bookings.passengerId', 'nombre email telefono idUniversitario')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    // Para pasajero, filtrar solo sus solicitudes
+    const asPassenger = await Trip.find({ "bookings.passengerId": meId })
+      .populate('driverId', 'nombre email vehicle')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    // Formatear para incluir el estado de la solicitud del pasajero
+    const formattedAsPassenger = asPassenger.map(trip => {
+      const myBooking = trip.bookings.find(b => b.passengerId.toString() === meId);
+      return {
+        ...trip,
+        myBookingStatus: myBooking?.status || null,
+        driver: trip.driverId ? {
+          nombre: trip.driverId.nombre,
+          vehicle: trip.driverId.vehicle
+        } : null
+      };
+    });
+    
+    return res.json({ asDriver, asPassenger: formattedAsPassenger });
   } catch (e) {
     console.error("❌ Error al listar viajes del usuario:", e);
     return res.status(500).json({ error: "Error al listar viajes" });
   }
 });
 
-// Reservar un viaje (rol: pasajero)
+// Obtener solicitudes pendientes de un viaje (rol: conductor)
+app.get("/api/trips/:tripId/requests", authRequired, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id);
+    if (!me) return res.status(401).json({ error: "No autorizado" });
+    if (!me.rolesCompleted?.conductor) return res.status(403).json({ error: "Debes completar onboarding de conductor" });
+
+    const trip = await Trip.findById(req.params.tripId)
+      .populate('bookings.passengerId', 'nombre email telefono idUniversitario')
+      .lean();
+    
+    if (!trip) return res.status(404).json({ error: "Viaje no encontrado" });
+    
+    // Verificar que el viaje pertenezca al conductor
+    if (trip.driverId.toString() !== me._id.toString()) {
+      return res.status(403).json({ error: "No tienes permiso para ver solicitudes de este viaje" });
+    }
+
+    // Separar solicitudes por estado
+    const pending = trip.bookings.filter(b => b.status === "pending");
+    const accepted = trip.bookings.filter(b => b.status === "accepted");
+    const rejected = trip.bookings.filter(b => b.status === "rejected");
+
+    return res.json({
+      trip: {
+        _id: trip._id,
+        from: trip.from,
+        to: trip.to,
+        departureTime: trip.departureTime,
+        price: trip.price,
+        seatsTotal: trip.seatsTotal,
+        seatsAvailable: trip.seatsTotal - accepted.length
+      },
+      requests: {
+        pending: pending,
+        accepted: accepted,
+        rejected: rejected
+      }
+    });
+  } catch (e) {
+    console.error("❌ Error al obtener solicitudes:", e);
+    return res.status(500).json({ error: "Error al obtener solicitudes" });
+  }
+});
+
+// Solicitar reserva de un viaje (rol: pasajero) - Ahora crea solicitud pendiente
 app.post("/api/trips/:id/book", authRequired, async (req, res) => {
   try {
     const me = await User.findById(req.user.id);
@@ -704,17 +779,130 @@ app.post("/api/trips/:id/book", authRequired, async (req, res) => {
 
     const trip = await Trip.findById(req.params.id);
     if (!trip) return res.status(404).json({ error: "Viaje no encontrado" });
-    if (trip.seatsAvailable <= 0) return res.status(400).json({ error: "No hay asientos disponibles" });
-    if (trip.driverId.toString() === me._id.toString()) return res.status(400).json({ error: "No puedes reservar tu propio viaje" });
-    const already = trip.bookings.some(b => b.passengerId.toString() === me._id.toString());
-    if (already) return res.status(400).json({ error: "Ya estás reservado en este viaje" });
+    
+    // Verificar que el viaje tenga asientos disponibles (contando solo aceptados)
+    const acceptedBookings = trip.bookings.filter(b => b.status === "accepted").length;
+    if (acceptedBookings >= trip.seatsTotal) {
+      return res.status(400).json({ error: "No hay asientos disponibles" });
+    }
+    
+    if (trip.driverId.toString() === me._id.toString()) {
+      return res.status(400).json({ error: "No puedes solicitar reserva en tu propio viaje" });
+    }
+    
+    // Verificar si ya tiene una solicitud (pendiente o aceptada)
+    const existingRequest = trip.bookings.find(b => b.passengerId.toString() === me._id.toString());
+    if (existingRequest) {
+      if (existingRequest.status === "pending") {
+        return res.status(400).json({ error: "Ya tienes una solicitud pendiente en este viaje" });
+      }
+      if (existingRequest.status === "accepted") {
+        return res.status(400).json({ error: "Ya estás aceptado en este viaje" });
+      }
+      // Si fue rechazada, puede volver a solicitar
+    }
 
-    trip.bookings.push({ passengerId: me._id });
-    trip.seatsAvailable -= 1;
+    // Crear solicitud pendiente
+    trip.bookings.push({ 
+      passengerId: me._id, 
+      status: "pending",
+      requestedAt: new Date()
+    });
     await trip.save();
-    return res.json({ message: "Reserva confirmada", tripId: trip._id, seatsAvailable: trip.seatsAvailable });
+    
+    return res.json({ 
+      message: "Solicitud de reserva enviada. Espera la respuesta del conductor.", 
+      tripId: trip._id,
+      status: "pending"
+    });
   } catch (e) {
-    console.error("❌ Error al reservar viaje:", e);
-    return res.status(500).json({ error: "Error al reservar" });
+    console.error("❌ Error al solicitar reserva:", e);
+    return res.status(500).json({ error: "Error al solicitar reserva" });
+  }
+});
+
+// Aceptar solicitud de reserva (rol: conductor)
+app.post("/api/trips/:tripId/requests/:requestId/accept", authRequired, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id);
+    if (!me) return res.status(401).json({ error: "No autorizado" });
+    if (!me.rolesCompleted?.conductor) return res.status(403).json({ error: "Debes completar onboarding de conductor" });
+
+    const trip = await Trip.findById(req.params.tripId);
+    if (!trip) return res.status(404).json({ error: "Viaje no encontrado" });
+    
+    // Verificar que el viaje pertenezca al conductor
+    if (trip.driverId.toString() !== me._id.toString()) {
+      return res.status(403).json({ error: "No tienes permiso para aceptar solicitudes de este viaje" });
+    }
+
+    // Verificar asientos disponibles
+    const acceptedBookings = trip.bookings.filter(b => b.status === "accepted").length;
+    if (acceptedBookings >= trip.seatsTotal) {
+      return res.status(400).json({ error: "No hay más asientos disponibles" });
+    }
+
+    // Buscar la solicitud
+    const requestIndex = trip.bookings.findIndex(
+      b => b.passengerId.toString() === req.params.requestId && b.status === "pending"
+    );
+    
+    if (requestIndex === -1) {
+      return res.status(404).json({ error: "Solicitud no encontrada o ya procesada" });
+    }
+
+    // Aceptar la solicitud
+    trip.bookings[requestIndex].status = "accepted";
+    trip.bookings[requestIndex].respondedAt = new Date();
+    trip.seatsAvailable = trip.seatsTotal - acceptedBookings - 1; // Restar 1 porque ahora hay uno más aceptado
+    await trip.save();
+
+    return res.json({ 
+      message: "Solicitud aceptada ✅", 
+      tripId: trip._id,
+      seatsAvailable: trip.seatsAvailable
+    });
+  } catch (e) {
+    console.error("❌ Error al aceptar solicitud:", e);
+    return res.status(500).json({ error: "Error al aceptar solicitud" });
+  }
+});
+
+// Rechazar solicitud de reserva (rol: conductor)
+app.post("/api/trips/:tripId/requests/:requestId/reject", authRequired, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id);
+    if (!me) return res.status(401).json({ error: "No autorizado" });
+    if (!me.rolesCompleted?.conductor) return res.status(403).json({ error: "Debes completar onboarding de conductor" });
+
+    const trip = await Trip.findById(req.params.tripId);
+    if (!trip) return res.status(404).json({ error: "Viaje no encontrado" });
+    
+    // Verificar que el viaje pertenezca al conductor
+    if (trip.driverId.toString() !== me._id.toString()) {
+      return res.status(403).json({ error: "No tienes permiso para rechazar solicitudes de este viaje" });
+    }
+
+    // Buscar la solicitud
+    const requestIndex = trip.bookings.findIndex(
+      b => b.passengerId.toString() === req.params.requestId && b.status === "pending"
+    );
+    
+    if (requestIndex === -1) {
+      return res.status(404).json({ error: "Solicitud no encontrada o ya procesada" });
+    }
+
+    // Rechazar la solicitud
+    trip.bookings[requestIndex].status = "rejected";
+    trip.bookings[requestIndex].respondedAt = new Date();
+    await trip.save();
+
+    return res.json({ 
+      message: "Solicitud rechazada", 
+      tripId: trip._id
+    });
+  } catch (e) {
+    console.error("❌ Error al rechazar solicitud:", e);
+    return res.status(500).json({ error: "Error al rechazar solicitud" });
   }
 });
