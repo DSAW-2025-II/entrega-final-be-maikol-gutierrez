@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import User from "./models/User.js";
 import Trip from "./models/Trip.js";
+import Message from "./models/Message.js";
 
 dotenv.config();
 
@@ -1061,6 +1062,210 @@ app.delete("/api/trips/:tripId", authRequired, async (req, res) => {
   } catch (e) {
     console.error("❌ Error al eliminar viaje:", e);
     return res.status(500).json({ error: "Error al eliminar viaje" });
+  }
+});
+
+// =====================
+// 💬 CHAT Y MENSAJERÍA
+// =====================
+
+// Obtener conversaciones del usuario (viajes donde tiene reservas aceptadas)
+app.get("/api/chat/conversations", authRequired, async (req, res) => {
+  try {
+    const meId = req.user.id;
+    
+    // Obtener viajes donde el usuario es conductor o pasajero aceptado
+    const tripsAsDriver = await Trip.find({ driverId: meId })
+      .populate('bookings.passengerId', 'nombre email')
+      .lean();
+    
+    const tripsAsPassenger = await Trip.find({ 
+      "bookings.passengerId": meId,
+      "bookings.status": "accepted"
+    })
+      .populate('driverId', 'nombre email')
+      .lean();
+    
+    // Formatear conversaciones
+    const conversations = [];
+    
+    // Conversaciones como conductor
+    tripsAsDriver.forEach(trip => {
+      const acceptedBookings = trip.bookings.filter(b => b.status === "accepted");
+      acceptedBookings.forEach(booking => {
+        const passenger = booking.passengerId;
+        if (passenger) {
+          conversations.push({
+            tripId: trip._id,
+            otherUserId: passenger._id,
+            otherUserName: passenger.nombre,
+            otherUserEmail: passenger.email,
+            trip: {
+              from: trip.from,
+              to: trip.to,
+              departureTime: trip.departureTime
+            },
+            role: "conductor"
+          });
+        }
+      });
+    });
+    
+    // Conversaciones como pasajero
+    tripsAsPassenger.forEach(trip => {
+      const myBooking = trip.bookings.find(b => 
+        b.passengerId && (b.passengerId._id?.toString() === meId || b.passengerId.toString() === meId)
+      );
+      if (myBooking && myBooking.status === "accepted" && trip.driverId) {
+        conversations.push({
+          tripId: trip._id,
+          otherUserId: trip.driverId._id,
+          otherUserName: trip.driverId.nombre,
+          otherUserEmail: trip.driverId.email,
+          trip: {
+            from: trip.from,
+            to: trip.to,
+            departureTime: trip.departureTime
+          },
+          role: "pasajero"
+        });
+      }
+    });
+    
+    return res.json({ conversations });
+  } catch (e) {
+    console.error("❌ Error al obtener conversaciones:", e);
+    return res.status(500).json({ error: "Error al obtener conversaciones" });
+  }
+});
+
+// Obtener mensajes de una conversación
+app.get("/api/chat/trips/:tripId/messages", authRequired, async (req, res) => {
+  try {
+    const meId = req.user.id;
+    const tripId = req.params.tripId;
+    
+    // Verificar que el usuario tenga acceso a esta conversación
+    const trip = await Trip.findById(tripId)
+      .populate('driverId', '_id')
+      .populate('bookings.passengerId', '_id')
+      .lean();
+    
+    if (!trip) {
+      return res.status(404).json({ error: "Viaje no encontrado" });
+    }
+    
+    const isDriver = trip.driverId._id.toString() === meId;
+    const isPassenger = trip.bookings.some(b => 
+      b.passengerId && (b.passengerId._id?.toString() === meId || b.passengerId.toString() === meId) && b.status === "accepted"
+    );
+    
+    if (!isDriver && !isPassenger) {
+      return res.status(403).json({ error: "No tienes acceso a esta conversación" });
+    }
+    
+    // Obtener mensajes de esta conversación
+    const messages = await Message.find({ tripId })
+      .populate('senderId', 'nombre')
+      .populate('receiverId', 'nombre')
+      .sort({ createdAt: 1 })
+      .lean();
+    
+    return res.json({ messages });
+  } catch (e) {
+    console.error("❌ Error al obtener mensajes:", e);
+    return res.status(500).json({ error: "Error al obtener mensajes" });
+  }
+});
+
+// Enviar mensaje
+app.post("/api/chat/trips/:tripId/messages", authRequired, async (req, res) => {
+  try {
+    const meId = req.user.id;
+    const tripId = req.params.tripId;
+    const { message, receiverId } = req.body;
+    
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "El mensaje no puede estar vacío" });
+    }
+    
+    // Verificar que el usuario tenga acceso a esta conversación
+    const trip = await Trip.findById(tripId)
+      .populate('driverId', '_id')
+      .populate('bookings.passengerId', '_id')
+      .lean();
+    
+    if (!trip) {
+      return res.status(404).json({ error: "Viaje no encontrado" });
+    }
+    
+    const isDriver = trip.driverId._id.toString() === meId;
+    const isPassenger = trip.bookings.some(b => 
+      b.passengerId && (b.passengerId._id?.toString() === meId || b.passengerId.toString() === meId) && b.status === "accepted"
+    );
+    
+    if (!isDriver && !isPassenger) {
+      return res.status(403).json({ error: "No tienes acceso a esta conversación" });
+    }
+    
+    // Determinar el receptor
+    let actualReceiverId;
+    if (isDriver) {
+      // Si soy conductor, el receptor es el pasajero
+      const acceptedBooking = trip.bookings.find(b => b.status === "accepted");
+      if (!acceptedBooking || !acceptedBooking.passengerId) {
+        return res.status(400).json({ error: "No hay pasajeros aceptados en este viaje" });
+      }
+      actualReceiverId = acceptedBooking.passengerId._id || acceptedBooking.passengerId;
+    } else {
+      // Si soy pasajero, el receptor es el conductor
+      actualReceiverId = trip.driverId._id;
+    }
+    
+    // Si se especificó receiverId, validar que coincida
+    if (receiverId && receiverId.toString() !== actualReceiverId.toString()) {
+      return res.status(400).json({ error: "Receptor inválido" });
+    }
+    
+    // Crear mensaje
+    const newMessage = await Message.create({
+      tripId,
+      senderId: meId,
+      receiverId: actualReceiverId,
+      message: message.trim()
+    });
+    
+    const populatedMessage = await Message.findById(newMessage._id)
+      .populate('senderId', 'nombre')
+      .populate('receiverId', 'nombre')
+      .lean();
+    
+    return res.status(201).json({ 
+      message: "Mensaje enviado ✅",
+      data: populatedMessage
+    });
+  } catch (e) {
+    console.error("❌ Error al enviar mensaje:", e);
+    return res.status(500).json({ error: "Error al enviar mensaje" });
+  }
+});
+
+// Marcar mensajes como leídos
+app.put("/api/chat/trips/:tripId/messages/read", authRequired, async (req, res) => {
+  try {
+    const meId = req.user.id;
+    const tripId = req.params.tripId;
+    
+    // Marcar como leídos todos los mensajes donde el usuario es el receptor
+    await Message.updateMany(
+      { tripId, receiverId: meId, read: false },
+      { read: true }
+    );
+    
+    return res.json({ message: "Mensajes marcados como leídos" });
+  } catch (e) {
+    console.error("❌ Error al marcar mensajes como leídos:", e);
+    return res.status(500).json({ error: "Error al marcar mensajes como leídos" });
   }
 });
 
