@@ -333,10 +333,14 @@ app.post("/api/onboarding/pasajero", authRequired, async (req, res) => {
     if (!user.currentRole) user.currentRole = "pasajero";
     await user.save();
 
+    // Generar nuevo token con el rol actualizado
+    const token = signAppToken({ id: user._id.toString(), role: user.currentRole });
+
     return res.json({
       message: "Onboarding de pasajero completado ✅",
       rolesCompleted: user.rolesCompleted,
-      currentRole: user.currentRole
+      currentRole: user.currentRole,
+      token: token
     });
   } catch (e) {
     console.error("❌ Error en onboarding pasajero:", e);
@@ -363,10 +367,14 @@ app.post("/api/onboarding/conductor", authRequired, async (req, res) => {
     }
     await user.save();
 
+    // Generar nuevo token con el rol actualizado
+    const token = signAppToken({ id: user._id.toString(), role: user.currentRole });
+
     return res.json({
       message: "Onboarding de conductor completado ✅",
       rolesCompleted: user.rolesCompleted,
-      currentRole: user.currentRole
+      currentRole: user.currentRole,
+      token: token
     });
   } catch (e) {
     console.error("❌ Error en onboarding conductor:", e);
@@ -392,7 +400,7 @@ app.get("/api/user/me", authRequired, async (req, res) => {
 });
 
 // =====================
-// 🔄 Cambiar rol actual (si está completado)
+// 🔄 Cambiar rol actual - Redirige a onboarding si no está completado
 // =====================
 app.put("/api/user/role", authRequired, async (req, res) => {
   const { role } = req.body;
@@ -401,13 +409,31 @@ app.put("/api/user/role", authRequired, async (req, res) => {
   }
   const user = await User.findById(req.user.id);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  // Si el rol no está completado, generar token de onboarding y redirigir
   if (!user.rolesCompleted[role]) {
-    return res.status(400).json({ error: "Debes completar el onboarding de este rol" });
+    const onboardingToken = signAppToken({ id: user._id.toString(), onboarding: true });
+    const nextRoute = role === "conductor" ? "/register-driver-vehicle" : "/register-photo";
+    
+    return res.status(200).json({ 
+      needOnboarding: true,
+      message: `Necesitas completar el onboarding de ${role}`,
+      onboardingToken,
+      nextRoute,
+      role: role
+    });
   }
+  
+  // Si el rol está completado, cambiar directamente
   user.currentRole = role;
   await user.save();
   const token = signAppToken({ id: user._id.toString(), role: user.currentRole });
-  return res.json({ message: "Rol cambiado ✅", role: user.currentRole, token });
+  return res.json({ 
+    message: "Rol cambiado ✅", 
+    role: user.currentRole, 
+    token,
+    needOnboarding: false
+  });
 });
 
 // =====================
