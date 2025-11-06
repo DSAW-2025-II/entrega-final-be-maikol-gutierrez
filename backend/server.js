@@ -462,15 +462,15 @@ app.get("/api/user/me", authRequired, async (req, res) => {
   try {
   const user = await User.findById(req.user.id).lean();
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
-    return res.json({
-      id: user._id,
-      nombre: user.nombre,
-      email: user.email,
+  return res.json({
+    id: user._id,
+    nombre: user.nombre,
+    email: user.email,
       telefono: user.telefono || "",
       idUniversitario: user.idUniversitario || "",
       photoUrl: user.photoUrl || "",
-      rolesCompleted: user.rolesCompleted,
-      currentRole: user.currentRole,
+    rolesCompleted: user.rolesCompleted,
+    currentRole: user.currentRole,
       preferredRole: user.preferredRole,
       status: user.status,
       vehicle: user.vehicle || {}
@@ -534,6 +534,44 @@ app.put("/api/user/me", authRequired, async (req, res) => {
   } catch (e) {
     console.error("❌ Error al actualizar perfil:", e);
     return res.status(500).json({ error: "Error al actualizar perfil" });
+  }
+});
+
+// =====================
+// 🗑️ Eliminar cuenta de usuario
+// =====================
+app.delete("/api/user/me", authRequired, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Buscar el usuario
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    // Eliminar todos los viajes creados por el usuario
+    await Trip.deleteMany({ driverId: userId });
+
+    // Eliminar todas las reservas del usuario (como pasajero)
+    await Trip.updateMany(
+      { "bookings.passengerId": userId },
+      { $pull: { bookings: { passengerId: userId } } }
+    );
+
+    // Eliminar mensajes del usuario
+    await Message.deleteMany({ $or: [{ senderId: userId }, { receiverId: userId }] });
+
+    // Eliminar el usuario
+    await User.findByIdAndDelete(userId);
+
+    return res.json({ 
+      message: "Cuenta eliminada exitosamente ✅",
+      deleted: true
+    });
+  } catch (e) {
+    console.error("❌ Error al eliminar cuenta:", e);
+    return res.status(500).json({ error: "Error al eliminar cuenta" });
   }
 });
 
