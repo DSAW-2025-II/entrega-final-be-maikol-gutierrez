@@ -670,8 +670,9 @@ app.get("/api/trips/search", async (req, res) => {
     // Filtrar y formatear viajes con asientos disponibles (solo aceptados cuentan)
     const formattedTrips = trips
       .map(trip => {
-        const acceptedCount = trip.bookings.filter(b => b.status === "accepted").length;
-        const availableSeats = trip.seatsTotal - acceptedCount;
+        const acceptedBookings = trip.bookings.filter(b => b.status === "accepted");
+        const totalAcceptedSeats = acceptedBookings.reduce((sum, b) => sum + (b.seats || 1), 0);
+        const availableSeats = trip.seatsTotal - totalAcceptedSeats;
         return {
           ...trip,
           seatsAvailable: availableSeats,
@@ -748,6 +749,9 @@ app.get("/api/trips/:tripId/requests", authRequired, async (req, res) => {
     const accepted = trip.bookings.filter(b => b.status === "accepted");
     const rejected = trip.bookings.filter(b => b.status === "rejected");
 
+    // Calcular asientos disponibles (solo aceptados cuentan)
+    const totalAcceptedSeats = accepted.reduce((sum, b) => sum + (b.seats || 1), 0);
+    
     return res.json({
       trip: {
         _id: trip._id,
@@ -756,7 +760,7 @@ app.get("/api/trips/:tripId/requests", authRequired, async (req, res) => {
         departureTime: trip.departureTime,
         price: trip.price,
         seatsTotal: trip.seatsTotal,
-        seatsAvailable: trip.seatsTotal - accepted.length
+        seatsAvailable: trip.seatsTotal - totalAcceptedSeats
       },
       requests: {
         pending: pending,
@@ -780,10 +784,21 @@ app.post("/api/trips/:id/book", authRequired, async (req, res) => {
     const trip = await Trip.findById(req.params.id);
     if (!trip) return res.status(404).json({ error: "Viaje no encontrado" });
     
+    // Obtener cantidad de asientos solicitados (default: 1)
+    const seatsRequested = Number(req.body.seats) || 1;
+    if (seatsRequested < 1) {
+      return res.status(400).json({ error: "Debes solicitar al menos 1 asiento" });
+    }
+    
     // Verificar que el viaje tenga asientos disponibles (contando solo aceptados)
-    const acceptedBookings = trip.bookings.filter(b => b.status === "accepted").length;
-    if (acceptedBookings >= trip.seatsTotal) {
-      return res.status(400).json({ error: "No hay asientos disponibles" });
+    const acceptedBookings = trip.bookings.filter(b => b.status === "accepted");
+    const totalAcceptedSeats = acceptedBookings.reduce((sum, b) => sum + (b.seats || 1), 0);
+    const availableSeats = trip.seatsTotal - totalAcceptedSeats;
+    
+    if (availableSeats < seatsRequested) {
+      return res.status(400).json({ 
+        error: `Solo hay ${availableSeats} asiento${availableSeats !== 1 ? 's' : ''} disponible${availableSeats !== 1 ? 's' : ''}` 
+      });
     }
     
     if (trip.driverId.toString() === me._id.toString()) {
@@ -805,15 +820,17 @@ app.post("/api/trips/:id/book", authRequired, async (req, res) => {
     // Crear solicitud pendiente
     trip.bookings.push({ 
       passengerId: me._id, 
+      seats: seatsRequested,
       status: "pending",
       requestedAt: new Date()
     });
     await trip.save();
     
     return res.json({ 
-      message: "Solicitud de reserva enviada. Espera la respuesta del conductor.", 
+      message: `Solicitud de reserva por ${seatsRequested} asiento${seatsRequested > 1 ? 's' : ''} enviada. Espera la respuesta del conductor.`, 
       tripId: trip._id,
-      status: "pending"
+      status: "pending",
+      seats: seatsRequested
     });
   } catch (e) {
     console.error("❌ Error al solicitar reserva:", e);
@@ -836,12 +853,6 @@ app.post("/api/trips/:tripId/requests/:requestId/accept", authRequired, async (r
       return res.status(403).json({ error: "No tienes permiso para aceptar solicitudes de este viaje" });
     }
 
-    // Verificar asientos disponibles
-    const acceptedBookings = trip.bookings.filter(b => b.status === "accepted").length;
-    if (acceptedBookings >= trip.seatsTotal) {
-      return res.status(400).json({ error: "No hay más asientos disponibles" });
-    }
-
     // Buscar la solicitud
     const requestIndex = trip.bookings.findIndex(
       b => b.passengerId.toString() === req.params.requestId && b.status === "pending"
@@ -851,10 +862,25 @@ app.post("/api/trips/:tripId/requests/:requestId/accept", authRequired, async (r
       return res.status(404).json({ error: "Solicitud no encontrada o ya procesada" });
     }
 
+    const request = trip.bookings[requestIndex];
+    const seatsRequested = request.seats || 1;
+
+    // Verificar asientos disponibles
+    const acceptedBookings = trip.bookings.filter(b => b.status === "accepted");
+    const totalAcceptedSeats = acceptedBookings.reduce((sum, b) => sum + (b.seats || 1), 0);
+    const availableSeats = trip.seatsTotal - totalAcceptedSeats;
+    
+    if (availableSeats < seatsRequested) {
+      return res.status(400).json({ 
+        error: `No hay suficientes asientos disponibles. Solo quedan ${availableSeats} asiento${availableSeats !== 1 ? 's' : ''}` 
+      });
+    }
+
     // Aceptar la solicitud
     trip.bookings[requestIndex].status = "accepted";
     trip.bookings[requestIndex].respondedAt = new Date();
-    trip.seatsAvailable = trip.seatsTotal - acceptedBookings - 1; // Restar 1 porque ahora hay uno más aceptado
+    const newTotalAcceptedSeats = totalAcceptedSeats + seatsRequested;
+    trip.seatsAvailable = trip.seatsTotal - newTotalAcceptedSeats;
     await trip.save();
 
     return res.json({ 
