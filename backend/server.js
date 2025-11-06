@@ -3,6 +3,9 @@ import express from "express";
 import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
+import User from "./models/User.js";
+import Trip from "./models/Trip.js";
 
 dotenv.config();
 
@@ -47,10 +50,62 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // =====================
-// 🗃️ BASE DE DATOS EN MEMORIA
+// 🛡️ Seguridad básica (headers tipo Helmet)
 // =====================
-let users = [];
-let nextId = 1;
+app.use((req, res, next) => {
+  // Protecciones comunes
+  res.setHeader("X-DNS-Prefetch-Control", "off");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Download-Options", "noopen");
+  res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-XSS-Protection", "0");
+  next();
+});
+
+// =====================
+// 🚦 Rate limiting por IP (sin dependencias)
+// =====================
+const RATE_WINDOW_MS = 60_000; // 1 minuto
+const RATE_MAX = 60; // 60 req/min por IP (global simple)
+const RATE_MAX_AUTH = 10; // 10 req/min para /api/auth/*
+const ipHits = new Map();
+
+function rateLimiter(maxPerWindow) {
+  return (req, res, next) => {
+    const ip = req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const entry = ipHits.get(ip) || { count: 0, resetAt: now + RATE_WINDOW_MS };
+    if (now > entry.resetAt) {
+      entry.count = 0;
+      entry.resetAt = now + RATE_WINDOW_MS;
+    }
+    entry.count += 1;
+    ipHits.set(ip, entry);
+    if (entry.count > maxPerWindow) {
+      res.setHeader("Retry-After", Math.ceil((entry.resetAt - now) / 1000).toString());
+      return res.status(429).json({ error: "Demasiadas solicitudes, intenta más tarde" });
+    }
+    next();
+  };
+}
+
+// Global suave y específico para auth
+app.use(rateLimiter(RATE_MAX));
+
+// =====================
+// 🗃️ CONEXIÓN A MONGODB
+// =====================
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+  console.warn("⚠️  MONGODB_URI no está definido. Configúralo en variables de entorno.");
+}
+mongoose
+  .connect(MONGODB_URI || "mongodb://127.0.0.1:27017/wheells", { dbName: "wheells" })
+  .then(() => console.log("✅ Conectado a MongoDB"))
+  .catch((err) => console.error("❌ Error conectando a MongoDB:", err.message));
 
 // Utilidades JWT
 const JWT_SECRET = process.env.JWT_SECRET || "claveultrasegura";
@@ -75,18 +130,23 @@ function authRequired(req, res, next) {
 // =====================
 // 🧪 RUTA DE PRUEBA
 // =====================
-app.get("/api/test", (req, res) => {
-  res.json({ 
-    message: "✅ Backend funcionando correctamente",
-    timestamp: new Date().toISOString(),
-    usersCount: users.length
-  });
+app.get("/api/test", async (req, res) => {
+  try {
+    const usersCount = await User.countDocuments();
+    res.json({ 
+      message: "✅ Backend funcionando correctamente",
+      timestamp: new Date().toISOString(),
+      usersCount
+    });
+  } catch (e) {
+    res.json({ message: "✅ Backend funcionando, sin DB count", timestamp: new Date().toISOString() });
+  }
 });
 
 // =====================
 // 🧍‍♀️ Registro de usuario - CON DEBUG COMPLETO
 // =====================
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
   try {
     // ✅ DEBUG COMPLETO - DETALLE DE CAMPOS
     console.log("=== 🐛 DEBUG REGISTRO ===");
@@ -108,6 +168,13 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(400).json({ error: "Todos los campos obligatorios deben estar completos" });
     }
 
+    // ✅ Validaciones básicas
+    const isValidEmail = (v) => /.+@.+\..+/.test(v);
+    const isValidPassword = (v) => typeof v === 'string' && v.length >= 6;
+
+    if (!isValidEmail(email)) return res.status(400).json({ error: "Email inválido" });
+    if (!isValidPassword(password)) return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+
     // ✅ CONVERTIR 'name' A 'nombre'
     const { name, email, password, telefono, idUniversitario, role } = req.body;
     const nombre = name;
@@ -115,7 +182,7 @@ app.post("/api/auth/register", async (req, res) => {
     console.log("✅ Todos los campos OK, procediendo con registro...");
 
     // Verificar si el usuario ya existe
-    const existingUser = users.find(user => user.email === email);
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
       console.log("❌ Usuario ya existe:", email);
       return res.status(400).json({ error: "El correo ya está registrado" });
@@ -126,8 +193,7 @@ app.post("/api/auth/register", async (req, res) => {
     
     // Crear nuevo usuario en estado de onboarding pendiente
     const initialRole = role === "conductor" ? "conductor" : "pasajero";
-    const newUser = {
-      id: nextId++,
+    const newUser = await User.create({
       nombre,
       email,
       password: hashedPassword,
@@ -135,15 +201,13 @@ app.post("/api/auth/register", async (req, res) => {
       idUniversitario: idUniversitario || "",
       rolesCompleted: { pasajero: false, conductor: false },
       currentRole: null,
-      status: "pending", // pending hasta completar al menos un rol
+      status: "pending",
       preferredRole: initialRole
-    };
-    
-    users.push(newUser);
-    console.log("✅ Usuario registrado exitosamente:", newUser.email);
-    console.log("📊 Total de usuarios registrados:", users.length);
+    });
 
-    const onboardingToken = signAppToken({ id: newUser.id, onboarding: true });
+    console.log("✅ Usuario registrado exitosamente:", newUser.email);
+
+    const onboardingToken = signAppToken({ id: newUser._id.toString(), onboarding: true });
     const nextRoute = initialRole === "conductor" ? "/register-driver-vehicle" : "/register-photo";
 
     res.status(201).json({ 
@@ -161,13 +225,15 @@ app.post("/api/auth/register", async (req, res) => {
 // =====================
 // 🔐 Inicio de sesión
 // =====================
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
   try {
     const { email, password } = req.body;
+    const isValidEmail = (v) => /.+@.+\..+/.test(v);
+    if (!isValidEmail(email)) return res.status(400).json({ error: "Email inválido" });
 
     console.log("🔐 Intento de login:", email);
 
-    const user = users.find(u => u.email === email);
+    const user = await User.findOne({ email });
     if (!user) {
       console.log("❌ Usuario no encontrado:", email);
       return res.status(404).json({ error: "Usuario no encontrado" });
@@ -192,8 +258,9 @@ app.post("/api/auth/login", async (req, res) => {
 
     const effectiveRole = user.currentRole || (user.rolesCompleted.conductor ? "conductor" : "pasajero");
     user.currentRole = effectiveRole;
+    await user.save();
 
-    const token = signAppToken({ id: user.id, role: effectiveRole });
+    const token = signAppToken({ id: user._id.toString(), role: effectiveRole });
 
     console.log("✅ Login exitoso:", email);
 
@@ -202,7 +269,7 @@ app.post("/api/auth/login", async (req, res) => {
       token,
       role: effectiveRole,
       nombre: user.nombre,
-      userId: user.id
+      userId: user._id
     });
   } catch (error) {
     console.error("❌ Error en login:", error);
@@ -215,12 +282,13 @@ app.post("/api/auth/login", async (req, res) => {
 // =====================
 app.post("/api/onboarding/pasajero", authRequired, async (req, res) => {
   try {
-    const user = users.find(u => u.id === req.user.id);
+    const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
     user.rolesCompleted.pasajero = true;
     user.status = "active";
     if (!user.currentRole) user.currentRole = "pasajero";
+    await user.save();
 
     return res.json({
       message: "Onboarding de pasajero completado ✅",
@@ -238,12 +306,19 @@ app.post("/api/onboarding/pasajero", authRequired, async (req, res) => {
 // =====================
 app.post("/api/onboarding/conductor", authRequired, async (req, res) => {
   try {
-    const user = users.find(u => u.id === req.user.id);
+    const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
     user.rolesCompleted.conductor = true;
     user.status = "active";
     if (!user.currentRole) user.currentRole = "conductor";
+    if (req.body) {
+      user.vehicle.marca = req.body.marca || user.vehicle.marca;
+      user.vehicle.modelo = req.body.modelo || user.vehicle.modelo;
+      user.vehicle.anio = req.body.anio || user.vehicle.anio;
+      user.vehicle.placa = req.body.placa || user.vehicle.placa;
+    }
+    await user.save();
 
     return res.json({
       message: "Onboarding de conductor completado ✅",
@@ -259,34 +334,36 @@ app.post("/api/onboarding/conductor", authRequired, async (req, res) => {
 // =====================
 // 👤 Datos del usuario actual
 // =====================
-app.get("/api/user/me", authRequired, (req, res) => {
-  const user = users.find(u => u.id === req.user.id);
+app.get("/api/user/me", authRequired, async (req, res) => {
+  const user = await User.findById(req.user.id).lean();
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   return res.json({
-    id: user.id,
+    id: user._id,
     nombre: user.nombre,
     email: user.email,
     rolesCompleted: user.rolesCompleted,
     currentRole: user.currentRole,
-    status: user.status
+    status: user.status,
+    vehicle: user.vehicle
   });
 });
 
 // =====================
 // 🔄 Cambiar rol actual (si está completado)
 // =====================
-app.put("/api/user/role", authRequired, (req, res) => {
+app.put("/api/user/role", authRequired, async (req, res) => {
   const { role } = req.body;
   if (role !== "pasajero" && role !== "conductor") {
     return res.status(400).json({ error: "Rol inválido" });
   }
-  const user = users.find(u => u.id === req.user.id);
+  const user = await User.findById(req.user.id);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   if (!user.rolesCompleted[role]) {
     return res.status(400).json({ error: "Debes completar el onboarding de este rol" });
   }
   user.currentRole = role;
-  const token = signAppToken({ id: user.id, role: user.currentRole });
+  await user.save();
+  const token = signAppToken({ id: user._id.toString(), role: user.currentRole });
   return res.json({ message: "Rol cambiado ✅", role: user.currentRole, token });
 });
 
@@ -303,7 +380,98 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🔥 Servidor escuchando en puerto ${PORT}`);
-  console.log(`🗃️ Usando base de datos en memoria`);
+  console.log(`🗃️ Base de datos: MongoDB`);
   console.log(`🌐 CORS permitido para: ${allowedOrigins.join(', ')}`);
   console.log(`📡 Endpoint de prueba: http://localhost:${PORT}/api/test`);
+});
+
+// =====================
+// 🚌 VIAJES Y RESERVAS
+// =====================
+
+// Crear viaje (rol: conductor)
+app.post("/api/trips", authRequired, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id);
+    if (!me) return res.status(401).json({ error: "No autorizado" });
+    if (!me.rolesCompleted?.conductor) return res.status(403).json({ error: "Debes completar onboarding de conductor" });
+
+    const { from, to, departureTime, price, seatsTotal } = req.body;
+    if (!from || !to || !departureTime || price == null || !seatsTotal) {
+      return res.status(400).json({ error: "Campos requeridos: from, to, departureTime, price, seatsTotal" });
+    }
+
+    const trip = await Trip.create({
+      driverId: me._id,
+      from,
+      to,
+      departureTime: new Date(departureTime),
+      price: Number(price),
+      seatsTotal: Number(seatsTotal),
+      seatsAvailable: Number(seatsTotal),
+    });
+
+    return res.status(201).json({ message: "Viaje creado", trip });
+  } catch (e) {
+    console.error("❌ Error al crear viaje:", e);
+    return res.status(500).json({ error: "Error al crear viaje" });
+  }
+});
+
+// Buscar viajes (query: from, to, date opcional)
+app.get("/api/trips/search", async (req, res) => {
+  try {
+    const { from, to, date } = req.query;
+    const criteria = { seatsAvailable: { $gt: 0 } };
+    if (from) criteria.from = new RegExp(from, "i");
+    if (to) criteria.to = new RegExp(to, "i");
+    if (date) {
+      const start = new Date(date);
+      const end = new Date(date);
+      end.setHours(23, 59, 59, 999);
+      criteria.departureTime = { $gte: start, $lte: end };
+    }
+    const trips = await Trip.find(criteria).sort({ departureTime: 1 }).limit(100).lean();
+    return res.json({ trips });
+  } catch (e) {
+    console.error("❌ Error al buscar viajes:", e);
+    return res.status(500).json({ error: "Error al buscar viajes" });
+  }
+});
+
+// Mis viajes (si soy conductor: que publiqué; si soy pasajero: que reservé)
+app.get("/api/trips/my", authRequired, async (req, res) => {
+  try {
+    const meId = req.user.id;
+    const asDriver = await Trip.find({ driverId: meId }).sort({ createdAt: -1 }).lean();
+    const asPassenger = await Trip.find({ "bookings.passengerId": meId }).sort({ createdAt: -1 }).lean();
+    return res.json({ asDriver, asPassenger });
+  } catch (e) {
+    console.error("❌ Error al listar viajes del usuario:", e);
+    return res.status(500).json({ error: "Error al listar viajes" });
+  }
+});
+
+// Reservar un viaje (rol: pasajero)
+app.post("/api/trips/:id/book", authRequired, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id);
+    if (!me) return res.status(401).json({ error: "No autorizado" });
+    if (!me.rolesCompleted?.pasajero) return res.status(403).json({ error: "Debes completar onboarding de pasajero" });
+
+    const trip = await Trip.findById(req.params.id);
+    if (!trip) return res.status(404).json({ error: "Viaje no encontrado" });
+    if (trip.seatsAvailable <= 0) return res.status(400).json({ error: "No hay asientos disponibles" });
+    if (trip.driverId.toString() === me._id.toString()) return res.status(400).json({ error: "No puedes reservar tu propio viaje" });
+    const already = trip.bookings.some(b => b.passengerId.toString() === me._id.toString());
+    if (already) return res.status(400).json({ error: "Ya estás reservado en este viaje" });
+
+    trip.bookings.push({ passengerId: me._id });
+    trip.seatsAvailable -= 1;
+    await trip.save();
+    return res.json({ message: "Reserva confirmada", tripId: trip._id, seatsAvailable: trip.seatsAvailable });
+  } catch (e) {
+    console.error("❌ Error al reservar viaje:", e);
+    return res.status(500).json({ error: "Error al reservar" });
+  }
 });
