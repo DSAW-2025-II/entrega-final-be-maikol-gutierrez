@@ -181,6 +181,12 @@ app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
 
     console.log("✅ Todos los campos OK, procediendo con registro...");
 
+    // Verificar conexión a MongoDB
+    if (mongoose.connection.readyState !== 1) {
+      console.error("❌ MongoDB no está conectado. Estado:", mongoose.connection.readyState);
+      return res.status(503).json({ error: "Servicio de base de datos no disponible" });
+    }
+
     // Verificar si el usuario ya existe
     const existingUser = await User.findOne({ email });
     if (existingUser) {
@@ -193,6 +199,7 @@ app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
     
     // Crear nuevo usuario en estado de onboarding pendiente
     const initialRole = role === "conductor" ? "conductor" : "pasajero";
+    
     const newUser = await User.create({
       nombre,
       email,
@@ -218,10 +225,25 @@ app.post("/api/auth/register", rateLimiter(RATE_MAX_AUTH), async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Error al registrar usuario:", error);
+    console.error("❌ Error name:", error.name);
+    console.error("❌ Error message:", error.message);
     console.error("❌ Stack trace:", error.stack);
+    
+    // Manejar errores específicos de MongoDB
+    if (error.name === 'MongoServerError' && error.code === 11000) {
+      return res.status(400).json({ error: "El correo ya está registrado" });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ 
+        error: "Error de validación",
+        message: error.message 
+      });
+    }
+    
     res.status(500).json({ 
       error: "Error al registrar el usuario",
       message: error.message || "Error desconocido",
+      errorType: error.name || "Unknown",
       details: process.env.NODE_ENV === "development" ? error.stack : undefined
     });
   }
