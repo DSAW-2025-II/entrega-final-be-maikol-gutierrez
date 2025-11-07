@@ -310,12 +310,29 @@ app.post("/api/auth/register", authRateLimiter(RATE_MAX_AUTH), async (req, res) 
 app.post("/api/auth/login", authRateLimiter(RATE_MAX_AUTH), async (req, res) => {
   try {
     const { email, password } = req.body;
+    
+    // Validaciones básicas
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email y contraseña son requeridos" });
+    }
+    
     const isValidEmail = (v) => /.+@.+\..+/.test(v);
-    if (!isValidEmail(email)) return res.status(400).json({ error: "Email inválido" });
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: "Email inválido" });
+    }
 
     console.log("🔐 Intento de login:", email);
 
-    const user = await User.findOne({ email });
+    // Verificar conexión a MongoDB
+    if (mongoose.connection.readyState !== 1) {
+      console.error("❌ MongoDB no está conectado. Estado:", mongoose.connection.readyState);
+      return res.status(503).json({ 
+        error: "Servicio de base de datos no disponible",
+        message: "Por favor, intenta de nuevo en unos momentos"
+      });
+    }
+
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
     if (!user) {
       console.log("❌ Usuario no encontrado:", email);
       return res.status(404).json({ error: "Usuario no encontrado" });
@@ -398,7 +415,16 @@ app.post("/api/auth/check-email", async (req, res) => {
       return res.status(400).json({ error: "Email inválido" });
     }
 
-    const existingUser = await User.findOne({ email });
+    // Verificar conexión a MongoDB
+    if (mongoose.connection.readyState !== 1) {
+      console.error("❌ MongoDB no está conectado. Estado:", mongoose.connection.readyState);
+      return res.status(503).json({ 
+        error: "Servicio de base de datos no disponible",
+        message: "Por favor, intenta de nuevo en unos momentos"
+      });
+    }
+
+    const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
     if (existingUser) {
       return res.status(400).json({ error: "El correo ya está registrado" });
     }
@@ -441,32 +467,44 @@ app.post("/api/auth/register-complete", async (req, res) => {
       });
     }
 
+    // Normalizar email
+    const normalizedEmail = email.trim().toLowerCase();
+
     // Verificar que el correo no esté en uso
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
+      console.log("❌ Intento de registro con email ya existente:", normalizedEmail);
       return res.status(400).json({ error: "El correo ya está registrado" });
     }
 
     // Hashear contraseña
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    console.log("📝 Intentando crear usuario pasajero:", { email, nombre });
+    console.log("📝 Intentando crear usuario pasajero:", { email: normalizedEmail, nombre });
 
     // Crear usuario completo con onboarding de pasajero ya completado
-    const newUser = await User.create({
-      nombre,
-      email,
-      password: hashedPassword,
-      telefono: telefono || "",
-      idUniversitario: idUniversitario || "",
-      photoUrl: photoUrl || "",
-      rolesCompleted: { pasajero: true, conductor: false },
-      currentRole: "pasajero",
-      status: "active",
-      preferredRole: "pasajero"
-    });
-
-    console.log("✅ Usuario pasajero creado exitosamente:", newUser._id, newUser.email);
+    let newUser;
+    try {
+      newUser = await User.create({
+        nombre: nombre.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        telefono: telefono?.trim() || "",
+        idUniversitario: idUniversitario?.trim() || "",
+        photoUrl: photoUrl || "",
+        rolesCompleted: { pasajero: true, conductor: false },
+        currentRole: "pasajero",
+        status: "active",
+        preferredRole: "pasajero"
+      });
+      console.log("✅ Usuario pasajero creado exitosamente:", newUser._id, newUser.email);
+    } catch (createError) {
+      console.error("❌ Error al crear usuario:", createError);
+      if (createError.name === 'MongoServerError' && createError.code === 11000) {
+        return res.status(400).json({ error: "El correo ya está registrado" });
+      }
+      throw createError;
+    }
 
     // Verificar que realmente se guardó
     const savedUser = await User.findById(newUser._id);
@@ -546,39 +584,51 @@ app.post("/api/auth/register-complete-conductor", async (req, res) => {
       });
     }
 
+    // Normalizar email
+    const normalizedEmail = email.trim().toLowerCase();
+
     // Verificar que el correo no esté en uso
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
+      console.log("❌ Intento de registro con email ya existente:", normalizedEmail);
       return res.status(400).json({ error: "El correo ya está registrado" });
     }
 
     // Hashear contraseña
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    console.log("📝 Intentando crear usuario conductor:", { email, nombre });
+    console.log("📝 Intentando crear usuario conductor:", { email: normalizedEmail, nombre });
 
     // Crear usuario completo con onboarding de conductor ya completado
-    const newUser = await User.create({
-      nombre,
-      email,
-      password: hashedPassword,
-      telefono: telefono || "",
-      idUniversitario: idUniversitario || "",
-      photoUrl: photoUrl || "",
-      rolesCompleted: { pasajero: false, conductor: true },
-      currentRole: "conductor",
-      status: "active",
-      preferredRole: "conductor",
-      vehicle: {
-        marca,
-        modelo,
-        anio,
-        placa,
-        photoUrl: vehiclePhotoUrl || ""
+    let newUser;
+    try {
+      newUser = await User.create({
+        nombre: nombre.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        telefono: telefono?.trim() || "",
+        idUniversitario: idUniversitario?.trim() || "",
+        photoUrl: photoUrl || "",
+        rolesCompleted: { pasajero: false, conductor: true },
+        currentRole: "conductor",
+        status: "active",
+        preferredRole: "conductor",
+        vehicle: {
+          marca: marca?.trim() || "",
+          modelo: modelo?.trim() || "",
+          anio: anio?.trim() || "",
+          placa: placa?.trim() || "",
+          photoUrl: vehiclePhotoUrl || ""
+        }
+      });
+      console.log("✅ Usuario conductor creado exitosamente:", newUser._id, newUser.email);
+    } catch (createError) {
+      console.error("❌ Error al crear usuario:", createError);
+      if (createError.name === 'MongoServerError' && createError.code === 11000) {
+        return res.status(400).json({ error: "El correo ya está registrado" });
       }
-    });
-
-    console.log("✅ Usuario conductor creado exitosamente:", newUser._id, newUser.email);
+      throw createError;
+    }
 
     // Verificar que realmente se guardó
     const savedUser = await User.findById(newUser._id);
