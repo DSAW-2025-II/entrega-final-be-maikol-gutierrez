@@ -137,15 +137,23 @@ if (!MONGODB_URI) {
 // Función para conectar a MongoDB
 async function connectToMongoDB() {
   try {
-    await mongoose.connect(MONGODB_URI || "mongodb://127.0.0.1:27017/wheells", { 
+    const uri = MONGODB_URI || "mongodb://127.0.0.1:27017/wheells";
+    console.log("🔌 Intentando conectar a MongoDB...");
+    console.log("🔌 URI:", uri.replace(/\/\/.*@/, '//***:***@')); // Ocultar credenciales en logs
+    
+    await mongoose.connect(uri, { 
       dbName: "wheells",
-      serverSelectionTimeoutMS: 5000, // Timeout de 5 segundos
+      serverSelectionTimeoutMS: 10000, // Aumentado a 10 segundos
       socketTimeoutMS: 45000,
     });
-    console.log("✅ Conectado a MongoDB");
+    
+    console.log("✅ Conectado a MongoDB exitosamente");
+    console.log("✅ Base de datos:", mongoose.connection.db.databaseName);
+    console.log("✅ Estado de conexión:", mongoose.connection.readyState);
     return true;
   } catch (err) {
     console.error("❌ Error conectando a MongoDB:", err.message);
+    console.error("❌ Error completo:", err);
     return false;
   }
 }
@@ -424,6 +432,15 @@ app.post("/api/auth/register-complete", async (req, res) => {
       return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
     }
 
+    // Verificar conexión a MongoDB
+    if (mongoose.connection.readyState !== 1) {
+      console.error("❌ MongoDB no está conectado. Estado:", mongoose.connection.readyState);
+      return res.status(503).json({ 
+        error: "Servicio de base de datos no disponible",
+        message: "Por favor, intenta de nuevo en unos momentos"
+      });
+    }
+
     // Verificar que el correo no esté en uso
     const existingUser = await User.findOne({ email });
     if (existingUser) {
@@ -432,6 +449,8 @@ app.post("/api/auth/register-complete", async (req, res) => {
 
     // Hashear contraseña
     const hashedPassword = await bcrypt.hash(password, 10);
+
+    console.log("📝 Intentando crear usuario pasajero:", { email, nombre });
 
     // Crear usuario completo con onboarding de pasajero ya completado
     const newUser = await User.create({
@@ -447,6 +466,16 @@ app.post("/api/auth/register-complete", async (req, res) => {
       preferredRole: "pasajero"
     });
 
+    console.log("✅ Usuario pasajero creado exitosamente:", newUser._id, newUser.email);
+
+    // Verificar que realmente se guardó
+    const savedUser = await User.findById(newUser._id);
+    if (!savedUser) {
+      console.error("❌ ERROR: El usuario no se guardó en la base de datos");
+      return res.status(500).json({ error: "Error al guardar usuario en la base de datos" });
+    }
+    console.log("✅ Usuario verificado en BD:", savedUser.email);
+
     // Generar token
     const token = signAppToken({ id: newUser._id.toString(), role: "pasajero" });
 
@@ -459,6 +488,10 @@ app.post("/api/auth/register-complete", async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Error al registrar usuario completo:", error);
+    console.error("❌ Error name:", error.name);
+    console.error("❌ Error message:", error.message);
+    console.error("❌ Error stack:", error.stack);
+    console.error("❌ MongoDB connection state:", mongoose.connection.readyState);
     
     if (error.name === 'MongoServerError' && error.code === 11000) {
       return res.status(400).json({ error: "El correo ya está registrado" });
@@ -472,7 +505,8 @@ app.post("/api/auth/register-complete", async (req, res) => {
 
     return res.status(500).json({ 
       error: "Error al completar registro",
-      message: error.message 
+      message: error.message,
+      details: process.env.NODE_ENV === "development" ? error.stack : undefined
     });
   }
 });
@@ -503,6 +537,15 @@ app.post("/api/auth/register-complete-conductor", async (req, res) => {
       return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
     }
 
+    // Verificar conexión a MongoDB
+    if (mongoose.connection.readyState !== 1) {
+      console.error("❌ MongoDB no está conectado. Estado:", mongoose.connection.readyState);
+      return res.status(503).json({ 
+        error: "Servicio de base de datos no disponible",
+        message: "Por favor, intenta de nuevo en unos momentos"
+      });
+    }
+
     // Verificar que el correo no esté en uso
     const existingUser = await User.findOne({ email });
     if (existingUser) {
@@ -511,6 +554,8 @@ app.post("/api/auth/register-complete-conductor", async (req, res) => {
 
     // Hashear contraseña
     const hashedPassword = await bcrypt.hash(password, 10);
+
+    console.log("📝 Intentando crear usuario conductor:", { email, nombre });
 
     // Crear usuario completo con onboarding de conductor ya completado
     const newUser = await User.create({
@@ -533,6 +578,16 @@ app.post("/api/auth/register-complete-conductor", async (req, res) => {
       }
     });
 
+    console.log("✅ Usuario conductor creado exitosamente:", newUser._id, newUser.email);
+
+    // Verificar que realmente se guardó
+    const savedUser = await User.findById(newUser._id);
+    if (!savedUser) {
+      console.error("❌ ERROR: El usuario no se guardó en la base de datos");
+      return res.status(500).json({ error: "Error al guardar usuario en la base de datos" });
+    }
+    console.log("✅ Usuario verificado en BD:", savedUser.email);
+
     // Generar token
     const token = signAppToken({ id: newUser._id.toString(), role: "conductor" });
 
@@ -544,7 +599,11 @@ app.post("/api/auth/register-complete-conductor", async (req, res) => {
       userId: newUser._id
     });
   } catch (error) {
-    console.error("❌ Error al registrar usuario completo:", error);
+    console.error("❌ Error al registrar usuario completo (conductor):", error);
+    console.error("❌ Error name:", error.name);
+    console.error("❌ Error message:", error.message);
+    console.error("❌ Error stack:", error.stack);
+    console.error("❌ MongoDB connection state:", mongoose.connection.readyState);
     
     if (error.name === 'MongoServerError' && error.code === 11000) {
       return res.status(400).json({ error: "El correo ya está registrado" });
@@ -558,7 +617,8 @@ app.post("/api/auth/register-complete-conductor", async (req, res) => {
 
     return res.status(500).json({ 
       error: "Error al completar registro",
-      message: error.message 
+      message: error.message,
+      details: process.env.NODE_ENV === "development" ? error.stack : undefined
     });
   }
 });
