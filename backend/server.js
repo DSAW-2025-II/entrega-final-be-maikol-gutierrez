@@ -380,7 +380,191 @@ app.post("/api/auth/login", authRateLimiter(RATE_MAX_AUTH), async (req, res) => 
 });
 
 // =====================
-// 🚀 Onboarding Pasajero
+// ✅ Verificar si email está disponible
+// =====================
+app.post("/api/auth/check-email", async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email || !/.+@.+\..+/.test(email)) {
+      return res.status(400).json({ error: "Email inválido" });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: "El correo ya está registrado" });
+    }
+
+    return res.json({ available: true });
+  } catch (e) {
+    console.error("❌ Error al verificar email:", e);
+    return res.status(500).json({ error: "Error al verificar email" });
+  }
+});
+
+// =====================
+// 🎯 Registro completo de pasajero (registro + onboarding)
+// =====================
+app.post("/api/auth/register-complete", async (req, res) => {
+  try {
+    const { nombre, email, password, telefono, idUniversitario, photoUrl } = req.body;
+
+    // Validaciones
+    if (!nombre || !email || !password) {
+      return res.status(400).json({ error: "Campos obligatorios faltantes" });
+    }
+
+    const isValidEmail = (v) => /.+@.+\..+/.test(v);
+    const isValidPassword = (v) => typeof v === 'string' && v.length >= 6;
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: "Email inválido" });
+    }
+    if (!isValidPassword(password)) {
+      return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+    }
+
+    // Verificar que el correo no esté en uso
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: "El correo ya está registrado" });
+    }
+
+    // Hashear contraseña
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Crear usuario completo con onboarding de pasajero ya completado
+    const newUser = await User.create({
+      nombre,
+      email,
+      password: hashedPassword,
+      telefono: telefono || "",
+      idUniversitario: idUniversitario || "",
+      photoUrl: photoUrl || "",
+      rolesCompleted: { pasajero: true, conductor: false },
+      currentRole: "pasajero",
+      status: "active",
+      preferredRole: "pasajero"
+    });
+
+    // Generar token
+    const token = signAppToken({ id: newUser._id.toString(), role: "pasajero" });
+
+    return res.status(201).json({
+      message: "Registro completado exitosamente ✅",
+      token,
+      role: "pasajero",
+      nombre: newUser.nombre,
+      userId: newUser._id
+    });
+  } catch (error) {
+    console.error("❌ Error al registrar usuario completo:", error);
+    
+    if (error.name === 'MongoServerError' && error.code === 11000) {
+      return res.status(400).json({ error: "El correo ya está registrado" });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ 
+        error: "Error de validación",
+        message: error.message 
+      });
+    }
+
+    return res.status(500).json({ 
+      error: "Error al completar registro",
+      message: error.message 
+    });
+  }
+});
+
+// =====================
+// 🎯 Registro completo de conductor (registro + onboarding completo)
+// =====================
+app.post("/api/auth/register-complete-conductor", async (req, res) => {
+  try {
+    const { nombre, email, password, telefono, idUniversitario, photoUrl, marca, modelo, anio, placa, vehiclePhotoUrl } = req.body;
+
+    // Validaciones
+    if (!nombre || !email || !password) {
+      return res.status(400).json({ error: "Campos obligatorios faltantes" });
+    }
+
+    if (!marca || !modelo || !anio || !placa) {
+      return res.status(400).json({ error: "Todos los campos del vehículo son obligatorios" });
+    }
+
+    const isValidEmail = (v) => /.+@.+\..+/.test(v);
+    const isValidPassword = (v) => typeof v === 'string' && v.length >= 6;
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: "Email inválido" });
+    }
+    if (!isValidPassword(password)) {
+      return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+    }
+
+    // Verificar que el correo no esté en uso
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: "El correo ya está registrado" });
+    }
+
+    // Hashear contraseña
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Crear usuario completo con onboarding de conductor ya completado
+    const newUser = await User.create({
+      nombre,
+      email,
+      password: hashedPassword,
+      telefono: telefono || "",
+      idUniversitario: idUniversitario || "",
+      photoUrl: photoUrl || "",
+      rolesCompleted: { pasajero: false, conductor: true },
+      currentRole: "conductor",
+      status: "active",
+      preferredRole: "conductor",
+      vehicle: {
+        marca,
+        modelo,
+        anio,
+        placa,
+        photoUrl: vehiclePhotoUrl || ""
+      }
+    });
+
+    // Generar token
+    const token = signAppToken({ id: newUser._id.toString(), role: "conductor" });
+
+    return res.status(201).json({
+      message: "Registro completado exitosamente ✅",
+      token,
+      role: "conductor",
+      nombre: newUser.nombre,
+      userId: newUser._id
+    });
+  } catch (error) {
+    console.error("❌ Error al registrar usuario completo:", error);
+    
+    if (error.name === 'MongoServerError' && error.code === 11000) {
+      return res.status(400).json({ error: "El correo ya está registrado" });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ 
+        error: "Error de validación",
+        message: error.message 
+      });
+    }
+
+    return res.status(500).json({ 
+      error: "Error al completar registro",
+      message: error.message 
+    });
+  }
+});
+
+// =====================
+// 🚀 Onboarding Pasajero (para usuarios que ya existen)
 // =====================
 app.post("/api/onboarding/pasajero", authRequired, async (req, res) => {
   try {
