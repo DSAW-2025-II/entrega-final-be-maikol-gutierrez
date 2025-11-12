@@ -857,7 +857,10 @@ app.post("/api/onboarding/pasajero", authRequired, async (req, res) => {
       message: "Onboarding de pasajero completado ✅",
       rolesCompleted: user.rolesCompleted,
       currentRole: user.currentRole,
-      token: token
+      role: user.currentRole,
+      token: token,
+      userId: user._id,
+      nombre: user.nombre
     });
   } catch (e) {
     console.error("❌ Error en onboarding pasajero:", e);
@@ -901,7 +904,10 @@ app.post("/api/onboarding/conductor", authRequired, async (req, res) => {
       message: "Onboarding de conductor completado ✅",
       rolesCompleted: user.rolesCompleted,
       currentRole: user.currentRole,
-      token: token
+      role: user.currentRole,
+      token: token,
+      userId: user._id,
+      nombre: user.nombre
     });
   } catch (e) {
     console.error("❌ Error en onboarding conductor:", e);
