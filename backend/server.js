@@ -1148,7 +1148,7 @@ app.post("/api/trips", authRequired, async (req, res) => {
     if (!me) return res.status(401).json({ error: "No autorizado" });
     if (!me.rolesCompleted?.conductor) return res.status(403).json({ error: "Debes completar onboarding de conductor" });
 
-    const { from, to, departureTime, price, seatsTotal } = req.body;
+    const { from, to, route, departureTime, price, seatsTotal } = req.body;
     if (!from || !to || !departureTime || price == null || !seatsTotal) {
       return res.status(400).json({ error: "Campos requeridos: from, to, departureTime, price, seatsTotal" });
     }
@@ -1157,6 +1157,7 @@ app.post("/api/trips", authRequired, async (req, res) => {
       driverId: me._id,
       from,
       to,
+      route: route || "",
       departureTime: new Date(departureTime),
       price: Number(price),
       seatsTotal: Number(seatsTotal),
@@ -1537,7 +1538,7 @@ app.put("/api/trips/:tripId", authRequired, async (req, res) => {
       return res.status(403).json({ error: "No tienes permiso para editar este viaje" });
     }
 
-    const { from, to, departureTime, price, seatsTotal } = req.body;
+    const { from, to, route, departureTime, price, seatsTotal } = req.body;
 
     // Validar que si se reduce seatsTotal, no sea menor a los asientos ya ocupados
     if (seatsTotal !== undefined) {
@@ -1554,6 +1555,7 @@ app.put("/api/trips/:tripId", authRequired, async (req, res) => {
     // Actualizar campos si están presentes
     if (from !== undefined) trip.from = from.trim();
     if (to !== undefined) trip.to = to.trim();
+    if (route !== undefined) trip.route = route.trim();
     if (departureTime !== undefined) trip.departureTime = new Date(departureTime);
     if (price !== undefined) trip.price = Number(price);
     if (seatsTotal !== undefined) {

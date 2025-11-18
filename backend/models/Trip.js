@@ -16,6 +16,7 @@ const TripSchema = new mongoose.Schema(
     driverId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     from: { type: String, required: true },
     to: { type: String, required: true },
+    route: { type: String, default: "" }, // Ruta/paradas del viaje
     departureTime: { type: Date, required: true },
     price: { type: Number, required: true, min: 0 },
     seatsTotal: { type: Number, required: true, min: 1 },
